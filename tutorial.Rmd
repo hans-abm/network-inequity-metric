@@ -1,0 +1,729 @@
+---
+title: 'R tutorial: Network inequity metrics — $\xi_a$ and $\xi_d$'
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 6, fig.height = 4)
+```
+
+This document introduces two closely related ways of measuring how
+**inequitably** a resource is distributed across a social network.
+
+## Why a network metric at all?
+
+Existing measures implicitly assumed that all people are equal in their
+need for resource access, conflated network position with need, and did
+not explicitly allow researchers to define need in measures of resource
+access. Furthermore, the usual tools for measuring distributional
+unfairness — the Gini coefficient, the Theil index — take a list of values
+and ask how unevenly spread they are. They are blind to *who is next to
+whom*. Two populations with identical Gini coefficients can be in
+completely different situations once you know the social structure: in
+one, the people without the resource sit next to people who have it; in
+the other, they are six hops away from the nearest holder, on the
+periphery of the network.
+
+For anything that travels through social ties — health information, a new
+practice, a referral, a piece of advice — that difference is the whole
+story. So the metrics here are built around a different primitive:
+
+> **Access is not what you hold. Access is who you can reach that holds a resource.**
+
+A node's access depends on how much resource exists *in its social
+network*, discounted by how far away that resource sits. Inequity is then
+the shortfall from full access, averaged across the population.
+
+There is a second departure from Gini and Theil worth flagging early.
+Those are *equality* measures: they treat all deviations from an even
+split the same way. The metrics here are *equity* measures: they carry a
+weight vector `w` that lets you say some people's shortfall matters more
+than others' — typically because they need the resource more. With
+uniform weights you get an equality-flavoured reading; with need-based
+weights you get an equity reading. Most of this tutorial uses uniform
+weights so that we can isolate the network mechanics, but `w` is where
+the equity part of the metric actually lives.
+
+## The two variants
+
+Both metrics answer the same question and differ in exactly one respect:
+**how access decays with distance.**
+
+|                        | $\xi_a$ (attenuated)                                        | $\xi_d$ (discrete)                                             |
+|------------------------|-------------------------------------------------------------|----------------------------------------------------------------|
+| Decay rule             | smooth, exponential                                          | hard boundary                                                   |
+| Tuning parameter       | `alpha` — decay rate                                         | `d` — reach in hops                                             |
+| Access at distance *d* | `exp(-alpha * d)` — shrinks, never quite zero                | 1 if *d* ≤ cutoff, else 0                                       |
+| Reads `R` as           | a continuous quantity                                        | binary (holds it / doesn't)                                     |
+| Suits                  | resources that dilute with social distance (information)     | resources with a genuine catchment (an invitation, a referral)  |
+
+Neither is the "correct" one. They are two modelling commitments about
+how far a resource travels, and picking between them is a substantive
+claim about your case, not a technical detail.
+
+## How this document is organised
+
+1. The shared skeleton behind both metrics (notation and intuition)
+2. The two definitions, in code, with a walk-through
+3. A toy network small enough to check by hand
+4. One resource vector, fed to both metrics
+5. Reading the output, node by node
+6. Sensitivity: what `alpha` and `d` actually do
+7. Need weights: what `w` does, and why it is the equity part
+8. Takeaways
+
+Nothing here depends on data you don't have — the whole document runs on
+a seven-node path graph you can verify with a pen.
+
+## 0. The shared skeleton
+
+Before any code, it helps to see that both metrics are the same two-step
+construction with one interchangeable part.
+
+**Step 1 — access.** For every node *i*, compute a score `A[i]` in [0, 1]
+saying how well served that node is. This is where the two metrics differ.
+
+*Attenuated version:* sum the resource held everywhere, each contribution
+discounted by its distance from *i*.
+
+$$A_i \;=\; \min\!\Big(1,\; \sum_j R_j \, e^{-\alpha\, d_{ij}}\Big)$$
+
+Note that the sum includes *j = i* itself, where the distance is zero and
+so the discount factor is `exp(0) = 1`. A node that holds the resource
+counts its own holding in full — as it should.
+
+*Discrete version:* check whether *i* is within `d` hops of anyone
+holding the resource.
+
+$$A_i \;=\; \begin{cases} 1 & \text{if } \min_{j:\,R_j > 0} d_{ij} \le d \\ 0 & \text{otherwise} \end{cases}$$
+
+**Step 2 — aggregate the shortfall.** Whatever access rule you used, the
+inequity score is the weighted mean of what each node is *missing*:
+
+$$\xi \;=\; \frac{\sum_i w_i\,(1 - A_i)}{\sum_i w_i}$$
+
+So `1 - A[i]` is node *i*'s individual shortfall, and `w[i]` says how
+heavily that shortfall should count. Both metrics land on the same scale:
+
+- **ξ = 0** — perfect equity. Everyone the weights care about has full
+  access.
+- **ξ = 1** — maximal inequity. Nobody has any access (for example,
+  nobody holds the resource at all).
+- Values in between are the weighted average shortfall, and are
+  interpretable as such: ξ = 0.6 means the average person — weighted by
+  need — is missing 60% of the access they could have had.
+
+Because it is a mean of per-node shortfalls rather than a summary of a
+distribution's shape, ξ is decomposable: you can always ask *which* nodes
+are driving the number by looking at the `A` vector the functions return
+alongside it.
+
+### Three implementation details worth knowing up front
+
+- **Disconnected components.** `igraph::distances()` returns `Inf` for
+  pairs in different components. A node in a component with no resource in
+  it gets `A = 0` and therefore a full shortfall of 1. That is the
+  intended behaviour — unreachable is unreachable — but it means a
+  fragmented network can push ξ up sharply, so it is worth checking
+  connectivity before interpreting a high score.
+- **The clip at 1.** With `normalize_A = TRUE` (the default), access is
+  capped at 1. Without the cap, a node sitting among several holders can
+  score above 1 and end up with a *negative* shortfall, quietly
+  subsidising other nodes' deficits in the average. Keeping the cap makes
+  ξ a genuine average of shortfalls, each bounded in [0, 1].
+- **Hop counts, not edge weights.** `distances()` uses the graph's `weight`
+  edge attribute if one exists. Both functions pass `weights = NA` to force
+  plain hop counts. If you *want* weighted path lengths, that argument is
+  the one to change.
+
+```{r libs, message=FALSE}
+library(igraph)
+```
+
+## 1. The definitions
+
+Both functions take the **same first two arguments**: a graph `G` and a
+resource vector `R` — a *named* numeric vector, keyed by node name, with
+values in [0, 1] saying how much resource each node holds. They also
+share the weight vector `w`, named the same way.
+
+The one input the two treat differently is `R` itself. $\xi_a$ uses it as
+a continuous quantity: a node holding 0.3 of the resource contributes 0.3,
+discounted by distance. $\xi_d$ reads it as a flag: any node with
+`R[node] > 0` is a holder, full stop, and 0.3 is treated no differently
+from 1.0.
+
+Feeding a single `R` to both is a deliberate choice. It means any
+disagreement between the two numbers comes from the decay rule alone —
+smooth taper versus hard cutoff — and not from having quietly handed them
+different data.
+
+Read the two function bodies side by side: the aggregation lines at the
+bottom are identical, and only the block computing `A` changes.
+
+```{r definitions}
+node_keys <- function(G) {
+  if (is.null(V(G)$name)) as.character(seq_len(vcount(G))) else as.character(V(G)$name)
+}
+
+xi_a <- function(G, R, w = NULL, alpha = 1.0, normalize_A = TRUE) {
+  nodes <- node_keys(G)
+  if (length(nodes) == 0L) return(list(xi = 1, A = setNames(numeric(0), character(0))))
+
+  if (is.null(w)) w <- setNames(rep(1, length(nodes)), nodes)
+
+  D <- distances(G, weights = NA)          # hop counts; Inf if unreachable
+  K <- exp(-alpha * D)
+  K[!is.finite(D)] <- 0                    # unreachable contributes nothing
+
+  r <- setNames(rep(0, length(nodes)), nodes)
+  shared <- intersect(names(R), nodes)
+  r[shared] <- R[shared]
+
+  A <- setNames(as.vector(K %*% r), nodes)
+  if (normalize_A) A <- pmin(A, 1)
+
+  total_weight <- sum(w)
+  if (total_weight == 0) return(list(xi = 1, A = A))
+
+  xi <- sum(w[nodes] * (1 - A)) / total_weight
+  list(xi = xi, A = A)
+}
+
+xi_d <- function(G, R, w = NULL, d = NULL) {
+  nodes <- node_keys(G)
+  if (length(nodes) == 0L) return(list(xi = 1, A = setNames(numeric(0), character(0))))
+
+  if (is.null(w)) w <- setNames(rep(1, length(nodes)), nodes)
+
+  total_weight <- sum(w)
+  if (total_weight == 0) return(list(xi = 1, A = setNames(numeric(0), character(0))))
+
+  holders <- intersect(names(R)[R > 0], nodes)
+  if (is.null(d)) d <- Inf
+
+  A <- setNames(rep(0, length(nodes)), nodes)
+  if (length(holders) > 0L) {
+    D <- distances(G, v = match(holders, nodes), weights = NA)
+    A[apply(is.finite(D) & D <= d, 2, any)] <- 1
+  }
+
+  xi <- sum(w[nodes] * (1 - A)) / total_weight
+  list(xi = xi, A = A)
+}
+```
+
+### Walking through $\xi_a$
+
+- `distances(G, weights = NA)` precomputes every pairwise hop count once,
+  as a full matrix in vertex order. Unreachable pairs come back `Inf`.
+- `K <- exp(-alpha * D)` turns that matrix into discount factors, and
+  `A <- K %*% r` is the access formula for every node at once. Writing it
+  as a matrix product rather than a double loop is both idiomatic and much
+  faster in R. The `K[!is.finite(D)] <- 0` line looks redundant — `exp(-Inf)`
+  is already 0 — but it matters when `alpha = 0`, where `-0 * Inf` is `NaN`.
+- Rebuilding `r` from `R` against the node list is the defensive step: a
+  node missing from `R` contributes 0 rather than erroring, and the
+  ordering is guaranteed to line up with `K`'s columns. Note that the
+  diagonal of `D` is 0, so a holder's own resource enters at full strength.
+- `pmin(A, 1)` applies the cap discussed above.
+- The final line is the weighted mean of `1 - A`. The guard on
+  `total_weight == 0` returns 1 — the maximally inequitable reading — on
+  the grounds that a weighting scheme that cares about nobody cannot
+  certify anything as equitable.
+- The function returns **both** ξ and the per-node access vector, as a
+  list, so you can always drill into the aggregate. R has no tuples; a
+  two-element list is the standard substitute.
+
+### Walking through $\xi_d$
+
+- `holders` collects every node with a strictly positive entry in `R`.
+- `distances(G, v = holders)` gives a holders × nodes matrix, and
+  `apply(..., 2, any)` asks, for each column, whether *any* holder is
+  within `d`. That replaces the loop-and-union in the Python version.
+- The `is.finite(D) &` guard is not optional: `d` becomes `Inf` when the
+  caller passes `NULL`, and `Inf <= Inf` is `TRUE` in R, so without it
+  every node in the graph — including unreachable ones — would count as
+  served.
+- `A` is then a pure 0/1 indicator of membership in that reachable set.
+  There is no partial credit: a node one hop past the boundary scores the
+  same as a node that is twenty hops away.
+
+## 2. A small toy network
+
+A path graph of 7 nodes makes the effect of distance easy to see by eye.
+It is a chain: 0–1–2–3–4–5–6. Node 0 will hold the resource, and because
+there is exactly one route between any two nodes, the distance from node 0
+to node *i* is simply *i*. That makes every number this document prints
+checkable by hand.
+
+igraph is 1-indexed, so vertices would be numbered 1–7 by default. We
+assign the names `"0"`–`"6"` explicitly to keep the arithmetic matching
+the description above; `node_keys()` then uses those names as the keys for
+`R`, `w` and `A`.
+
+Alongside the drawing we also keep the adjacency matrix `adj` — the same
+graph as a plain 0/1 matrix. It isn't used by the metrics (they work off
+the igraph object directly), but it is a useful sanity check that the
+graph is what you think it is: you should see 1s only on the two
+off-diagonals.
+
+A path is of course an extreme topology — maximum diameter for its size,
+no redundancy, every node a bottleneck. That is precisely why it is a good
+first test: effects that are subtle in a realistic network are impossible
+to miss here.
+
+```{r toy-graph}
+G <- make_ring(7, circular = FALSE)   # a path: 0-1-2-3-4-5-6
+V(G)$name <- as.character(0:6)
+
+adj <- as_adjacency_matrix(G, sparse = FALSE)
+
+plot(G, vertex.color = "lightblue", vertex.size = 30,
+     main = "Toy network: Path of 7 nodes")
+
+cat("Adjacency matrix (G):\n")
+print(adj)
+```
+
+## 3. One resource vector, fed to both metrics
+
+Node `0` — one end of the chain — holds the resource, and everyone else
+has none. This is the worst-case placement on a path: it maximises the
+average distance to the resource, so the ξ values that come out will be
+high. Placing it at node 3 instead would halve the longest distance.
+
+`w` gives equal priority weight to every node, so nothing in the
+comparison below is driven by weighting choices. This is the *equality*
+setting of the metric, and it is the right control for a tutorial about
+the decay rules. In substantive use, `w` is where you would encode need —
+larger weights on the people for whom lacking the resource matters most —
+and the same network can then produce very different ξ values depending on
+whether the high-need nodes sit near node 0 or out at node 6.
+
+Note there is only **one** vector here — `R` — used directly by both
+$\xi_a$ and $\xi_d$.
+
+```{r resource}
+nodes <- node_keys(G)
+
+R <- setNames(as.numeric(nodes == "0"), nodes)
+w <- setNames(rep(1, length(nodes)), nodes)
+
+print(R)
+```
+
+Colouring the network by who holds the resource makes the setup visible.
+Gold is the single holder; everything else is a node whose access has to
+come through the chain.
+
+(The layout is chosen by igraph, so the path may not be drawn as a
+straight line — the *drawing* is a cosmetic choice, while the distances
+that matter are hop counts along the edges.)
+
+```{r resource-plot}
+set.seed(0)
+plot(G,
+     vertex.color = ifelse(R > 0, "gold", "lightblue"),
+     vertex.size = 30,
+     layout = layout_with_fr(G),
+     main = "Toy network colored by resource holding (gold = holds R)")
+```
+
+## 4. Compute both metrics on the same `R`
+
+$\xi_a$ is called with `alpha = 1.0`: each additional hop multiplies a
+contribution by `exp(-1) ≈ 0.37`, so access falls by roughly two thirds
+per step. $\xi_d$ is called with `d = 2`: everything within two hops of
+node 0 is fully served, everything beyond is fully excluded.
+
+Both return a list with `$xi` and `$A`, so we can print the aggregate and
+then inspect the per-node access scores that produced it. Comparing the
+two `A` vectors is the fastest way to internalise what separates the
+metrics.
+
+The chunk below is set to `results='asis'`, which is the R Markdown
+equivalent of `IPython.display.Markdown` — it sends `cat()` output
+straight to the document rather than into a verbatim block, so the `$\xi_a$`
+in the strings is rendered as maths rather than printed literally. A plain
+`print()` or a default chunk would show the dollar signs.
+
+```{r compute, results='asis'}
+res_a <- xi_a(G, R, w = w, alpha = 1.0)
+res_d <- xi_d(G, R, w = w, d = 2)
+
+cat(sprintf("$\\xi_a$ ($\\alpha$=1.0) = %.3f\n\n", res_a$xi))
+cat(sprintf("$\\xi_d$ ($d$=2) = %.3f\n\n", res_d$xi))
+
+cat("Per-node access under $\\xi_a$ (A):\n\n")
+cat(sprintf("- node %s: A=%.3f\n", names(res_a$A), res_a$A), sep = "")
+
+cat("\nPer-node access under $\\xi_d$ (A):\n\n")
+cat(sprintf("- node %s: A=%.3f\n", names(res_d$A), res_d$A), sep = "")
+```
+
+### Reading the output
+
+**Under $\xi_a$,** the access column is just `exp(-1 * d)` evaluated along
+the chain, because there is only one holder:
+
+| node | distance from holder | `A`   |
+|------|----------------------|-------|
+| 0    | 0                    | 1.000 |
+| 1    | 1                    | 0.368 |
+| 2    | 2                    | 0.135 |
+| 3    | 3                    | 0.050 |
+| 4    | 4                    | 0.018 |
+| 5    | 5                    | 0.007 |
+| 6    | 6                    | 0.002 |
+
+The shortfalls `1 - A` sum to about 5.42, and dividing by 7 gives
+**$\xi_a$ ≈ 0.774**. Node 2, two hops out, still carries nonzero access —
+the exponential never reaches zero, it only becomes negligible. By node 5
+the access is small enough to be arithmetically irrelevant, which is worth
+noting: with `alpha = 1`, the metric has effectively stopped
+distinguishing between "far" and "very far".
+
+**Under $\xi_d$ with `d = 2`,** the same node 2 counts as *fully*
+accessible — it is inside the boundary, so it scores 1.0, exactly like the
+holder itself. Node 3 onward scores 0.0. Three of seven nodes are served,
+so **$\xi_d$ = 4/7 ≈ 0.571**.
+
+**The two numbers disagree, and that is the point.** 0.774 versus 0.571 on
+identical data. The discrete metric is more generous here because it
+awards full marks inside its catchment, where the attenuated metric has
+already discounted node 1 to 0.37 and node 2 to 0.14. Change `d` to 1 and
+the ordering flips. So the two are not interchangeable, and their values
+are not directly comparable in level — what *is* comparable is how each one
+moves when you change the network, the seeding, or the weights. That is
+why the two are typically reported together: agreement in the *pattern*
+across conditions is evidence that a result is about structure rather than
+about the arbitrary choice of decay rule.
+
+## 5. Sensitivity: `alpha` vs. `d`
+
+`alpha` controls how fast $\xi_a$'s attenuation decays with distance; `d`
+controls how far $\xi_d$'s hard boundary extends. They encode the same
+intuition — closer to a holder is better — but respond differently.
+
+The two parameters run in opposite directions:
+
+- **Larger `alpha` = steeper decay = higher $\xi_a$.** Distance is punished
+  harder, so measured inequity rises. A useful way to calibrate it: access
+  halves every `log(2)/alpha ≈ 0.69/alpha` hops. At `alpha = 0.25` that is
+  about 2.8 hops, so influence carries a long way; at `alpha = 2` it is
+  about a third of a hop, so essentially only immediate neighbours count.
+- **Larger `d` = wider catchment = lower $\xi_d$.** More nodes fall inside
+  the boundary, so measured inequity falls. `d = NULL` means no bound at
+  all — anyone in the same connected component counts as served, which on
+  this connected graph drives $\xi_d$ to exactly 0.
+
+Neither parameter is a nuisance knob to be tuned for a nice-looking
+result. Each is a claim about the phenomenon: `alpha` says how quickly
+influence dissipates through social ties, `d` says how many hops count as
+being within reach. Choose them from theory or from what is known about
+the diffusion process, fix them, and report the sweep so readers can see
+how much of your conclusion rests on the choice.
+
+Note the `list(1, 2, 3, NULL)` rather than `c(...)` for the cutoffs: `NULL`
+is a legitimate value of `d` here, and `c()` would silently drop it.
+
+```{r sweep}
+alphas  <- c(0.25, 0.5, 1.0, 2.0)
+cutoffs <- list(1, 2, 3, NULL)
+
+xi_a_by_alpha  <- sapply(alphas,  function(a) xi_a(G, R, w = w, alpha = a)$xi)
+xi_d_by_cutoff <- sapply(cutoffs, function(k) xi_d(G, R, w = w, d = k)$xi)
+
+cat("xi_a by alpha:\n")
+cat(sprintf("  alpha=%-5s -> xi_a=%.3f\n", alphas, xi_a_by_alpha), sep = "")
+
+cat("\nxi_d by cutoff:\n")
+cat(sprintf("  cutoff=%-5s -> xi_d=%.3f\n",
+            sapply(cutoffs, function(k) if (is.null(k)) "NULL" else as.character(k)),
+            xi_d_by_cutoff), sep = "")
+```
+
+Reading the sweep:
+
+- **$\xi_a$** climbs from 0.466 (`alpha=0.25`) to 0.835 (`alpha=2.0`) —
+  monotone increasing, as expected, and the curve flattens at the top.
+  Once decay is steep enough that only neighbours count, making it steeper
+  changes little, because there is nothing left to take away.
+- **$\xi_d$** falls from 0.714 (`cutoff=1`) through 0.571 and 0.429 to
+  exactly 0 at `NULL`. On a 7-node path with one holder at the end, each
+  extra hop of reach converts exactly one more node from excluded to
+  served, so the sequence steps down by 1/7 at a time. The drop to 0 at
+  `NULL` is the reminder that an unbounded cutoff makes the metric measure
+  connectivity rather than access.
+- The ranges overlap: $\xi_a$ ≈ 0.57 sits somewhere around `alpha ≈ 0.4`,
+  and $\xi_d$ = 0.571 at `cutoff=2`. You can always find parameter settings
+  that make the two agree on one network — but they will not stay agreed
+  when the network changes, because they are responding to different
+  features of it.
+
+The plot below shows the $\xi_a$ side of that sweep. There is no matching
+line for `d` because it is a discrete parameter with one value (`NULL`)
+that has no position on a numeric axis.
+
+```{r sweep-plot}
+plot(alphas, xi_a_by_alpha, type = "b", pch = 19,
+     xlab = expression(alpha), ylab = expression(xi[a]))
+```
+
+## 6. Need weights: what `w` does
+
+Everything so far has run with uniform weights, which makes ξ a plain
+average of shortfalls. That is an *equality* reading: it treats a hop of
+distance as equally bad no matter who is on the far end of it.
+
+The weight vector is what turns the metric into an *equity* measure.
+Recall the aggregation step:
+
+$$\xi \;=\; \frac{\sum_i w_i\,(1 - A_i)}{\sum_i w_i}$$
+
+`w[i]` is a claim about how much node *i*'s shortfall should count —
+normally standing in for need, vulnerability, or risk. A node with twice
+the weight contributes twice as much to the total. Three properties follow
+directly from the formula and are worth stating explicitly:
+
+- **Only relative weights matter.** The denominator normalises, so
+  multiplying every weight by 100 leaves ξ unchanged. `w` is a profile,
+  not a quantity, and you never need to make it sum to anything in
+  particular.
+- **A zero weight removes a node from the accounting entirely.** Its access
+  is still computed, but its shortfall is not counted. That is occasionally
+  what you want (a node representing a service rather than a person) and is
+  otherwise a strong assumption.
+- **`w` never changes `A`.** Weights affect who *counts*, not who *has
+  access*. The two questions stay cleanly separated, which is what makes
+  the comparison below interpretable.
+
+The important consequence is this: **`G`, `R` and the whole access vector
+`A` can be held completely fixed while ξ moves a long way, purely because
+of `w`.** Coverage — the share of people served — is blind to that
+movement. This is the core claim the metric exists to make.
+
+### 6.1 Need weights on the toy path
+
+Same chain, same holder at node 0, same access scores as before. All that
+changes is where we say the need is:
+
+- `w_uniform` — everyone counts equally (the equality baseline).
+- `w_near` — the three nodes nearest the holder (0, 1, 2) count three
+  times as much as the rest. Need happens to sit where the resource is.
+- `w_far` — the three nodes at the far end (4, 5, 6) count three times as
+  much. Need sits where the resource is not.
+
+The intervention is identical in all three cases. Only our judgement about
+whose exclusion matters has changed.
+
+```{r toy-weights}
+idx <- as.integer(nodes)   # "0".."6" back to 0..6 for the comparisons below
+
+w_uniform <- setNames(rep(1, length(nodes)), nodes)                   # equality baseline
+w_near    <- setNames(ifelse(idx <= 2, 3, 1), nodes)                  # need near the holder
+w_far     <- setNames(ifelse(idx >= 4, 3, 1), nodes)                  # need at the far end
+
+schemes <- list(uniform = w_uniform, near = w_near, far = w_far)
+
+cat(sprintf("%-10s %8s %8s\n", "weights", "xi_a", "xi_d"))
+for (nm in names(schemes)) {
+  a <- xi_a(G, R, w = schemes[[nm]], alpha = 1.0)$xi
+  d <- xi_d(G, R, w = schemes[[nm]], d = 2)$xi
+  cat(sprintf("%-10s %8.3f %8.3f\n", nm, a, d))
+}
+
+# Only the *relative* weights matter: scaling every weight by 100 changes nothing.
+w_near_scaled <- w_near * 100
+cat("\nw_near rescaled x100 -> xi_a =",
+    round(xi_a(G, R, w = w_near_scaled, alpha = 1.0)$xi, 3), "\n")
+```
+
+The spread is substantial, and it comes from nothing but `w`:
+
+| weights | $\xi_a$ | $\xi_d$ |
+|---------|---------|---------|
+| uniform | 0.774   | 0.571   |
+| near    | 0.647   | 0.308   |
+| far     | 0.874   | 0.769   |
+
+Under $\xi_d$ the reading swings from 0.308 to 0.769 — from a fairly
+equitable-looking intervention to a badly inequitable one — while the set
+of served nodes {0, 1, 2} never changes. An evaluator reporting coverage
+would report 3/7 in every row and see nothing at all.
+
+$\xi_a$ moves in the same direction but less dramatically (0.647 to 0.874),
+which is a general pattern: because it grades access continuously, no node
+is ever fully written off, so reweighting cannot swing it as far as it
+swings a metric with a hard boundary. The rescaling check at the bottom
+confirms the normalisation — `w_near` and `w_near × 100` return exactly the
+same value.
+
+### 6.2 Need weights on a network with real structure
+
+The path graph has no degree variation, so "near the holder" and "far from
+the holder" had to be imposed by hand. In a scale-free network the
+structure supplies the contrast for us: a few hubs with many ties, a long
+tail of nodes with two or three.
+
+We build a 100-node Barabási–Albert network and seed the resource at the
+3% highest-degree nodes — the standard degree-targeted intervention. Then
+we vary only the need profile:
+
+- **`uniform`** — need is unrelated to network position.
+- **`degree`** — need is proportional to degree, so the people who need the
+  resource most are the well-connected ones.
+- **`inv_degree`** — need is proportional to 1/degree, so need is
+  concentrated in the periphery.
+
+The middle scheme is the comfortable case for a hub-seeding strategy: it
+puts the resource exactly where the need is. The third is the awkward one,
+and it is not a contrived scenario — for many health and social outcomes,
+isolation and need genuinely travel together.
+
+Two differences from the Python original are worth flagging. First,
+igraph's `sample_pa()` and networkx's `barabasi_albert_graph()` are
+different generators with different RNGs, so the numbers below will not
+match the Python notebook's even at the same nominal parameters — only the
+*pattern* should carry over. Second, `sample_pa()` does not guarantee a
+minimum degree of `m`: the earliest vertices can end up with degree 1,
+which matters for the `inv_degree` weights, so the code checks the minimum
+before dividing.
+
+```{r scale-free}
+set.seed(7)
+SF <- sample_pa(100, m = 2, directed = FALSE)
+V(SF)$name <- as.character(seq_len(vcount(SF)))
+
+sf_nodes <- node_keys(SF)
+deg <- degree(SF)
+
+# Seed the 3% highest-degree nodes, as a degree-targeted intervention would.
+k <- max(1, round(0.03 * vcount(SF)))
+seeds <- names(sort(deg, decreasing = TRUE))[seq_len(k)]
+R_sf <- setNames(as.numeric(sf_nodes %in% seeds), sf_nodes)
+
+cat(sprintf("nodes: %d, degree range: %d-%d\n", vcount(SF), min(deg), max(deg)))
+cat(sprintf("seeded %d nodes: %s (degrees %s)\n",
+            k, paste(seeds, collapse = ", "), paste(deg[seeds], collapse = ", ")))
+```
+
+```{r scale-free-weights}
+w_sf <- list(
+  uniform    = setNames(rep(1, length(sf_nodes)), sf_nodes),  # need unrelated to position
+  degree     = setNames(as.numeric(deg), sf_nodes),           # need at the centre
+  inv_degree = setNames(1 / as.numeric(deg), sf_nodes)        # need at the periphery
+)
+
+xi_a_sf <- sapply(w_sf, function(ws) xi_a(SF, R_sf, w = ws, alpha = 1.0)$xi)
+xi_d_sf <- sapply(w_sf, function(ws) xi_d(SF, R_sf, w = ws, d = 2)$xi)
+
+# Coverage depends on G and R alone - it cannot see the weights at all.
+A_sf <- xi_d(SF, R_sf, w = w_sf$uniform, d = 2)$A
+coverage <- mean(A_sf)
+cat(sprintf("coverage within 2 hops: %.0f%% (identical under all three schemes)\n\n",
+            100 * coverage))
+
+cat(sprintf("%-13s %8s %8s\n", "need weights", "xi_a", "xi_d"))
+cat(sprintf("%-13s %8.3f %8.3f\n", names(w_sf), xi_a_sf, xi_d_sf), sep = "")
+```
+
+```{r scale-free-plot}
+M <- rbind(xi_a_sf, xi_d_sf)
+barplot(M, beside = TRUE, names.arg = names(w_sf),
+        col = c("steelblue", "darkorange"), ylab = "xi",
+        main = "Same network, same seeds - only the need weights differ")
+legend("topleft", legend = c(expression(xi[a]~"("*alpha*"=1.0)"), expression(xi[d]~"(d=2)")),
+       fill = c("steelblue", "darkorange"), bty = "n")
+```
+
+### Reading the scale-free result
+
+**Coverage says the intervention worked.** A large majority of nodes are
+within two hops of a seed, from an intervention that touched three nodes.
+On that number alone this is a success, and it is the same figure in every
+row — coverage is computed from `G` and `R`, so no choice of weights can
+move it.
+
+**ξ says it depends on who was missed.** The expected ordering is
+`degree` < `uniform` < `inv_degree` under both metrics, with $\xi_d$
+showing the wider spread and $\xi_a$ the same ordering on a compressed
+scale. Ordering, not magnitude, is what to read across the two metrics.
+
+**Why it moves in that direction.** Hub seeding reaches hubs and their
+neighbours first, so the nodes left outside the two-hop boundary have
+systematically lower degree than those inside. Weighting by degree
+therefore down-weights precisely the people who were missed, and weighting
+by inverse degree up-weights them. You can check this directly:
+
+```{r who-was-missed}
+missed <- names(A_sf)[A_sf == 0]
+cat(sprintf("mean degree, outside 2-hop boundary: %.1f\n", mean(deg[missed])))
+cat(sprintf("mean degree, inside 2-hop boundary:  %.1f\n",
+            mean(deg[setdiff(names(A_sf), missed)])))
+
+A_cont <- xi_a(SF, R_sf, w = w_sf$uniform, alpha = 1.0)$A
+cat(sprintf("mean A (attenuated), degree <= 2: %.2f\n", mean(A_cont[deg <= 2])))
+cat(sprintf("mean A (attenuated), degree >= 6: %.2f\n", mean(A_cont[deg >= 6])))
+```
+
+**The general lesson.** Adoption and coverage are *effectiveness*
+measures, and they are silent about distribution. A degree-targeted
+intervention will nearly always look good on them, because hubs are cheap
+to reach and reach many others. Whether it looks good on ξ depends on
+something coverage cannot represent: the alignment between where the
+resource lands and where the need sits. When those are misaligned — the
+`inv_degree` row — the intervention is measurably less equitable at
+identical coverage, and only a need-weighted metric will say so.
+
+A caveat on this specific demonstration: the gaps here are real but
+modest, because a single 100-node draw with three seeds is a small
+example. `degree` and `inv_degree` are also fairly gentle need profiles —
+sharper ones (say degree² or a threshold on the bottom quartile) separate
+the schemes further. Treat the direction as the finding and the size as an
+artefact of the toy setup.
+
+## 7. Takeaways
+
+**On the inputs.** $\xi_a$ and $\xi_d$ share the same inputs (`G`, `R`,
+`w`). `R` is a continuous resource vector, but for $\xi_d$'s purposes it is
+read as binary: `R[node] > 0` means that node holds the resource. Keeping
+one `R` for both is what makes the comparison clean.
+
+**On the difference.** $\xi_a$ uses `R`'s magnitude directly as a
+distance-discounted quantity (controlled by `alpha`); $\xi_d$ only cares
+whether `R` is zero or not, then applies a hard reachability cutoff
+(controlled by `d`). Everything else about the two — the shortfall, the
+weighting, the aggregation, the [0, 1] scale — is identical.
+
+**On disagreement.** Because of that, $\xi_a$ and $\xi_d$ on the *same* `R`
+can disagree in magnitude — that is expected, and reflects the underlying
+modelling choice (smooth attenuation vs. hard cutoff), not different data.
+Compare them on *patterns across conditions*, not on levels.
+
+**On interpretation.** ξ is a weighted mean of per-node shortfalls, so it
+is always decomposable: when a number surprises you, look at the `A` vector
+and find the nodes carrying the deficit. A high ξ can mean the resource is
+scarce, or that it is badly placed, or that the network is fragmented —
+and only the per-node scores tell you which.
+
+**On the weights.** `w` is where the equity claim lives. It changes who
+counts, never who has access, and only its relative values matter. Holding
+`G`, `R` and `A` fixed and varying `w` alone moved $\xi_d$ from 0.31 to
+0.77 on the toy path — all at constant coverage. That gap is exactly what
+an effectiveness measure cannot see.
+
+**What is still missing.** Everything here is a single fixed `R`, not a
+diffusion process, and one draw of one network rather than a distribution
+over runs. The three topologies behave differently under reweighting —
+scale-free networks are far more sensitive to it than random or
+small-world ones, because they have the degree heterogeneity for need and
+position to become misaligned in the first place — and demonstrating that
+properly needs repeated runs rather than the single examples used here.
