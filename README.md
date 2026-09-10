@@ -39,8 +39,8 @@ seeding strategies, and node weightings.
 ## Files
 
 - `helper.py` — `xi_a` / `xi_d` metric implementations.
-- `transfer.py` — Pigou–Dalton transfer-principle check for `xi_a` on small toy
-  graphs.
+- `transfer.py` — Pigou–Dalton transfer-principle check for `xi_a` on a 3-node
+  path graph (End–Center–End); plots `xi_a` before/after each transfer.
 - `main.py` — runs the batch diffusion simulation (network kind × weighting ×
   targeting × repeats) and writes results/plots to `results/`.
 - `slopes.py` - analyses the results from `main.py` and calculates Average Marginal Effects
