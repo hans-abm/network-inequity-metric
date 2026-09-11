@@ -25,9 +25,11 @@ POS = {0: (0, 0), 1: (1, 0), 2: (2, 0)}  # fixed layout: same 3 nodes throughout
 _BLUE = "#4682b4"  # high access
 _GRAY = "#808080"  # low access
 _CMAP = mcolors.LinearSegmentedColormap.from_list("access", [_GRAY, _BLUE])
+_ARROW_COLOR = "#D55E00"  # the transfer itself, kept distinct from the access palette
 
 FONTSIZE = 12
 NODE_SIZE = 700
+_ARROW_RAD = 0.35  # arc curvature; also makes the 0->2 transfer visibly arc over node 1
 
 
 def path3():
@@ -101,6 +103,20 @@ def plot(G, xi0, scenarios, out_path="results/paper/transfer_plot"):
             font_size=FONTSIZE - 1,
             with_labels=True,
         )
+
+        # Arc above the row from donor (a) to recipient (b), so the two
+        # nodes actually exchanging resource are visually obvious -- and for
+        # the 0->2 transfer, the arc visibly bows over node 1, showing it's
+        # bypassed rather than involved.
+        ax.annotate(
+            "", xy=POS[b], xytext=POS[a],
+            arrowprops=dict(
+                arrowstyle="-|>", color=_ARROW_COLOR, lw=1.8,
+                shrinkA=16, shrinkB=16, mutation_scale=16,
+                connectionstyle=f"arc3,rad={_ARROW_RAD}",
+            ),
+        )
+
         for node, (x, y) in POS.items():
             # R_i (endowment, the thing the transfer actually moves) above
             # A_i (resulting access score); both printed in plain black,
