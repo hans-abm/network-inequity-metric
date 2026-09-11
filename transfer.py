@@ -55,33 +55,41 @@ SCENARIOS = [
 
 
 def run():
+    """Baseline xi_a plus the post-transfer state for each scenario.
 
+    No separate baseline panel is plotted -- each scenario panel carries the
+    baseline implicitly, spelled out as the exact arithmetic in its title
+    (R_a before -> after, R_b before -> after) plus the resulting xi_a
+    transition (baseline -> after). The plotted network/colors are always the
+    post-transfer state.
+    """
     G = path3()
-    xi0, A0 = xi_a(G, BASELINE_R, alpha=ALPHA)
-    states = [("Baseline", BASELINE_R, xi0, A0, None, None)]
+    xi0, _ = xi_a(G, BASELINE_R, alpha=ALPHA)
 
+    scenarios = []
     for label, a, b in SCENARIOS:
         R = transfer(BASELINE_R, a, b, DELTA)
         xi, A = xi_a(G, R, alpha=ALPHA)
-        states.append((label, R, xi, A, a, b))
+        scenarios.append((label, a, b, R, xi, A))
 
-    return G, states
+    return G, xi0, scenarios
 
 
-def plot(G, states, out_path="results/paper/transfer_plot"):
-    n_cols = len(states)
-    fig, axes = plt.subplots(1, n_cols, figsize=(2.4 * n_cols, 2.9))
+def plot(G, xi0, scenarios, out_path="results/paper/transfer_plot"):
+    n_cols = len(scenarios)
+    fig, axes = plt.subplots(1, n_cols, figsize=(2.7 * n_cols, 2.7))
 
-    # Normalize colors against the full spread of A values seen across all
-    # panels, so shading stays comparable panel-to-panel and isn't washed
-    # out by the fixed [0, 1] range A rarely reaches with only 3 nodes.
-    all_A = [v for _, _, _, A, _, _ in states for v in A.values()]
+    # Normalize colors against the spread of A values across the plotted
+    # (post-transfer) panels, so shading stays comparable panel-to-panel and
+    # isn't washed out by the fixed [0, 1] range A rarely reaches with only
+    # 3 nodes.
+    all_A = [v for _, _, _, _, _, A in scenarios for v in A.values()]
     vmin, vmax = min(all_A), max(all_A)
 
     def color_for(value):
         return _CMAP((value - vmin) / (vmax - vmin))
 
-    for ax, (label, R, xi, A, a, b) in zip(axes, states):
+    for ax, (_label, a, b, R, xi, A) in zip(axes, scenarios):
         node_colors = [color_for(A[node]) for node in G.nodes()]
         nx.draw_networkx(
             G, pos=POS, ax=ax,
@@ -96,23 +104,28 @@ def plot(G, states, out_path="results/paper/transfer_plot"):
         for node, (x, y) in POS.items():
             # R_i (endowment, the thing the transfer actually moves) above
             # A_i (resulting access score); both printed in plain black,
-            # since node fill color already encodes A.
+            # since node fill color already encodes A. These are the
+            # post-transfer values -- the state actually drawn.
             ax.text(x, y - 0.28, f"$R_{{{node}}}$ = {R[node]:.2f}",
                     fontsize=FONTSIZE - 3, ha="center", va="top", color="#333333")
-            ax.text(x, y - 0.44, f"$A_{{{node}}}$ = {A[node]:.2f}",
+            ax.text(x, y - 0.39, f"$A_{{{node}}}$ = {A[node]:.2f}",
                     fontsize=FONTSIZE - 3, ha="center", va="top", color="#333333")
 
-        if a is None:
-            title = f"{label}\n$\\xi_a$ = {xi:.2f}"
-        else:
-            transfer_eq = (
-                f"$R_{{{a}}} \\leftarrow R_{{{a}}} - \\delta,"
-                f"\\ R_{{{b}}} \\leftarrow R_{{{b}}} + \\delta$"
-            )
-            title = f"{transfer_eq}\n$\\xi_a$ = {xi:.2f}"
-        ax.set_title(title, fontsize=FONTSIZE - 1)
+        # Title spells out the exact transfer -- baseline value, delta, and
+        # result -- for both nodes it touches. This is what carries
+        # "baseline" now that its own panel is gone.
+        donor_eq = fr"$R_{{{a}}} = {BASELINE_R[a]:.2f} - {DELTA:.2f} = {R[a]:.2f}$"
+        recip_eq = fr"$R_{{{b}}} = {BASELINE_R[b]:.2f} + {DELTA:.2f} = {R[b]:.2f}$"
+        title = "\n".join([donor_eq, recip_eq])
+        ax.set_title(title, fontsize=FONTSIZE - 1, pad=8, linespacing=1.9)
+
+        # xi_a's before -> after sits under the three nodes as a panel
+        # caption, same size as the title equations above.
+        xi_eq = fr"$\xi_a\!: {xi0:.2f} \to {xi:.2f}$"
+        ax.text(1, -0.58, xi_eq, fontsize=FONTSIZE - 1, ha="center", va="top", color="black")
+
         ax.set_xlim(-0.6, 2.6)
-        ax.set_ylim(-0.75, 0.6)
+        ax.set_ylim(-0.82, 0.12)
         ax.axis("off")
 
     fig.tight_layout()
@@ -125,5 +138,5 @@ def plot(G, states, out_path="results/paper/transfer_plot"):
 
 
 if __name__ == "__main__":
-    G, states = run()
-    plot(G, states)
+    G, xi0, scenarios = run()
+    plot(G, xi0, scenarios)

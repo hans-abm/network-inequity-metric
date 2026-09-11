@@ -7,7 +7,7 @@ from scipy.stats import norm
 
 # Point this at a main.py-generated diffusion_reach.csv (has both xi_d_* and xi_a_*
 # columns, plus a targeting column with "degree" / "random" strategies).
-CSV_PATH = "models/diffusion/results/20260722_140942_100/diffusion_reach.csv"
+CSV_PATH = "results/20260722_140942_100/diffusion_reach.csv"
 
 df = pd.read_csv(CSV_PATH)
 
