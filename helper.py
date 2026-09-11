@@ -6,7 +6,7 @@ please see tutorial.ipynb or tutorial.Rmd for implementations in Python and R, r
 
 import numpy as np
 import networkx as nx
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Sequence
 
 def xi_a(G: nx.Graph,
          R: Dict[int, float],
@@ -112,6 +112,102 @@ def xi_a(G: nx.Graph,
     
     xi = sum(w[i] * (1 - A[i]) for i in nodes) / total_weight
     return xi, A
+
+
+def xi_a_multi(G: nx.Graph,
+               R: Dict[int, float],
+               w: Optional[Dict[int, float]] = None,
+               alphas: Sequence[float] = (1.0,),
+               edge_weight: Optional[str] = None,
+               normalize_A: bool = True) -> Dict[float, Tuple[float, float]]:
+
+    """
+    Evaluate xi_a at several decay parameters in one pass.
+
+    Equivalent to calling `xi_a` once per alpha, but the all-pairs distances
+    (the expensive part) are computed once and shared, and the access sums are
+    vectorised over numpy rather than looped in Python. A sweep over k alphas
+    therefore costs roughly the same as a single `xi_a` call, not k times as much.
+    This matters because alpha never affects the diffusion itself, only the
+    post-hoc metric, so sweeping it is pure post-processing on fixed runs.
+
+    Parameters
+    ----------
+    G, R, w, edge_weight, normalize_A
+        As in `xi_a`.
+    alphas : sequence of float
+        Distance decay parameters to evaluate.
+
+    Returns
+    -------
+    dict
+        alpha → (xi, sat_frac), where `xi` matches what `xi_a` would return for
+        that alpha and `sat_frac` is the fraction of nodes whose access score hit
+        the `normalize_A` cap of 1.0. A high `sat_frac` means alpha is too small
+        to discriminate: every node reads as fully served and xi collapses to 0.
+        `sat_frac` is 0.0 when `normalize_A` is False.
+    """
+
+    nodes = list(G.nodes())
+    n = len(nodes)
+
+    if n == 0:
+        return {float(a): (1.0, 0.0) for a in alphas}
+
+    if w is None:
+        w = {node: 1.0 for node in nodes}
+
+    # Same distance semantics as xi_a: optional edge strengths become inverse
+    # distances, otherwise plain unweighted hop counts.
+    if edge_weight is not None:
+        G_dist = nx.Graph()
+        G_dist.add_nodes_from(G.nodes())
+        for u, v, data in G.edges(data=True):
+            edge_strength = data.get(edge_weight, 1.0)
+            if edge_strength <= 0:
+                edge_strength = 1e-6
+            G_dist.add_edge(u, v, weight=1.0 / edge_strength)
+
+        try:
+            dist_dict = dict(nx.all_pairs_dijkstra_path_length(G_dist, weight='weight'))
+        except Exception:
+            dist_dict = dict(nx.all_pairs_shortest_path_length(G))
+    else:
+        dist_dict = dict(nx.all_pairs_shortest_path_length(G))
+
+    index = {node: i for i, node in enumerate(nodes)}
+    D = np.full((n, n), np.inf)
+    for i, targets in dist_dict.items():
+        row = index[i]
+        for j, d_ij in targets.items():
+            D[row, index[j]] = d_ij
+
+    r = np.array([R.get(node, 0.0) for node in nodes], dtype=float)
+    wv = np.array([w[node] for node in nodes], dtype=float)
+    total_weight = wv.sum()
+
+    results: Dict[float, Tuple[float, float]] = {}
+    for alpha in alphas:
+        if total_weight == 0:
+            results[float(alpha)] = (1.0, 0.0)
+            continue
+
+        # exp(-alpha * inf) underflows to 0, which is exactly the "unreachable
+        # contributes nothing" branch in xi_a; errstate keeps numpy quiet about it.
+        with np.errstate(over="ignore", invalid="ignore"):
+            A = (np.exp(-alpha * D) * r).sum(axis=1)
+
+        if normalize_A:
+            sat_frac = float((A >= 1.0 - 1e-9).mean())
+            A = np.minimum(A, 1.0)
+        else:
+            sat_frac = 0.0
+
+        xi = float((wv * (1.0 - A)).sum() / total_weight)
+        results[float(alpha)] = (xi, sat_frac)
+
+    return results
+
 
 # -----------------------------
 # Discrete xi metric (binary reachability + node need weights)
